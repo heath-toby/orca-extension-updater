@@ -61,6 +61,9 @@ class Result:
     error: str | None = None
     downloaded_bytes: int = 0
     has_install_script: bool = False
+    # Set when the new version is installed and approved but has not been
+    # loaded, because the extension doing the updating cannot reload itself.
+    restart_required: bool = False
     # Set when a rollback itself failed to come back up. The add-on cannot
     # repair this from inside Orca, so it must stop and say so.
     unrecoverable: bool = False
@@ -186,9 +189,18 @@ def should_copy(relpath: str, extra: tuple[str, ...]) -> bool:
 class Installer:
     """Runs one update at a time, start to finish or not at all."""
 
-    def __init__(self, extensions_dir: str, log: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        extensions_dir: str,
+        log: Callable[[str], None] | None = None,
+        self_source_id: str = "",
+    ) -> None:
         self._extensions_dir = extensions_dir
         self._log = log or (lambda _message: None)
+        # Our own source id, so updating ourselves can be told apart from
+        # updating anything else. Reloading the extension that is running the
+        # reload would re-import this module underneath its own stack frames.
+        self._self_source_id = self_source_id
         self._client: Client | None = None
         self._cancelled = False
 
@@ -307,7 +319,7 @@ class Installer:
         on_progress(VALIDATE_END + (1.0 - VALIDATE_END) * 0.6)
 
         self._approve(paths.installed)
-        self._reload(item)
+        self._reload(item, result)
         on_progress(1.0)
         result.ok = True
 
@@ -465,7 +477,7 @@ class Installer:
         except Exception as error:  # pylint: disable=broad-exception-caught
             raise _Failed(f"could not approve the update: {error}") from error
 
-    def _reload(self, item: Managed) -> None:
+    def _reload(self, item: Managed, result: Result | None = None) -> None:
         """Loads the new version now, so a bad one is caught while we can undo it.
 
         Two checks, because they catch different things. The try/except
@@ -474,9 +486,25 @@ class Installer:
         catches a failed import or a raising constructor, which Orca does
         guard -- it logs them and returns None, so the extension simply is
         not there and nothing says so out loud.
+
+        **Except for ourselves.** Reloading this extension would purge this
+        very module from ``sys.modules`` and re-import it while the code doing
+        the reloading is still running inside the old one, and Orca's reload
+        also tears down and re-registers every extension's commands on the
+        way through. The new version is installed and approved, and a restart
+        picks it up; that is reported rather than risked.
         """
 
         from orca import extension_loader
+
+        if self._self_source_id and item.source_id == self._self_source_id:
+            self._log(
+                f"{item.source_id} is this extension; installed and approved but "
+                "not reloaded. A restart is needed to run the new version."
+            )
+            if result is not None:
+                result.restart_required = True
+            return
 
         loader = extension_loader.get_loader()
         try:

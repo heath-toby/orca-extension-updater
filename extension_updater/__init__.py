@@ -31,7 +31,7 @@ from .scheduler import INTERVAL_DEFAULT as _INTERVAL_DEFAULT
 from .scheduler import INTERVALS as _INTERVALS
 from .scheduler import Scheduler as _Scheduler
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Where the log goes. Never inside the package: Orca hashes every file in an
 # extension's directory, so a log written there would un-approve the add-on
@@ -63,7 +63,7 @@ class ExtensionUpdater(Extension):
         "checked before it replaces anything, and the previous version is "
         "restored if it does not load."
     )
-    VERSION = "1.0.0"  # keep in sync with __version__; read by AST, must be a literal
+    VERSION = "1.0.1"  # keep in sync with __version__; read by AST, must be a literal
     AUTHOR = "Toby"
     WEBSITE = "https://github.com/heath-toby/orca-extension-updater"
 
@@ -311,6 +311,10 @@ class ExtensionUpdater(Extension):
                     log=self.log,
                     remember_size=self._remember_size,
                     expected_size=self._expected_size,
+                    # Orca imports us as orca_user_extension.<source id>, so
+                    # the last component is the name our own approval and
+                    # reload are keyed by.
+                    self_source_id=__name__.rsplit(".", 1)[-1],
                 )
             self._flow.offer(available)
 

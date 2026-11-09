@@ -121,8 +121,13 @@ clone; the completion dialog says which add-ons ship one.
 ## Restarting
 
 Updates are live as soon as they are installed, because each one is reloaded
-and checked. A restart is only needed for the updater itself, which cannot
-reload its own module while running.
+and checked.
+
+The exception is this add-on updating itself. Reloading it would purge its own
+module from `sys.modules` and re-import it while the code doing the reloading
+is still running inside the old one, so it is installed and approved but not
+reloaded, and the completion dialog says a restart is needed to run it. It
+does not claim to be active when it is not.
 
 The restart is chosen, not assumed. Under systemd, `orca.service` carries
 `Restart=always`, so `systemctl --user restart orca` is used and

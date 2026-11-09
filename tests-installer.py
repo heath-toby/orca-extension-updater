@@ -164,16 +164,22 @@ for name, repo, package in PAIRS:
     shutil.rmtree(staging)
     installer._stage(source, staging, repo)
     want, got = tree(target), tree(staging)
+    # Which files get installed is the install.sh-equivalence check.
     check(f"staging matches install.sh: {name}", got, want)
-    if want == got:
-        differing = sorted(
-            path
-            for path in want
-            if not filecmp.cmp(
-                os.path.join(target, path), os.path.join(staging, path), shallow=False
-            )
+    # Whether their bytes survive the copy is a separate question, and it is
+    # asked against the *source*, not against the installed copy. Comparing
+    # with the installed copy would only hold while the two are in step, so
+    # bumping a version without reinstalling would fail a row that is
+    # supposed to be about copying faithfully.
+    differing = sorted(
+        path
+        for path in got
+        if os.path.exists(os.path.join(source, path))
+        and not filecmp.cmp(
+            os.path.join(source, path), os.path.join(staging, path), shallow=False
         )
-        check(f"staged contents are identical: {name}", differing, [])
+    )
+    check(f"staged bytes match the source: {name}", differing, [])
     shutil.rmtree(staging, ignore_errors=True)
 
 
@@ -418,7 +424,66 @@ check(
     True,
 )
 
-# (e) A release that does not contain the package at all.
+# (e) Updating the updater itself: installed and approved, but not reloaded,
+# because reloading would re-import this very module underneath the code doing
+# the reloading. It must be reported as needing a restart, not as live.
+loader = FakeLoader()
+root, extensions = install_fixture()
+try:
+    release = os.path.join(root, "rel", "heath-toby-demo-abc123", "demo")
+    os.makedirs(release)
+    with open(os.path.join(release, "__init__.py"), "w", encoding="utf-8") as handle:
+        handle.write('VERSION = "2.0.0"\n')
+    tarball = os.path.join(root, "self.tar.gz")
+    with tarfile.open(tarball, "w:gz") as archive:
+        archive.add(os.path.dirname(release), arcname="heath-toby-demo-abc123")
+
+    fake = types.ModuleType("orca.extension_loader")
+    fake.get_loader = lambda: loader
+    real = sys.modules.get("orca.extension_loader")
+    import orca as orca_pkg
+
+    real_attr = getattr(orca_pkg, "extension_loader", None)
+    sys.modules["orca.extension_loader"] = fake
+    orca_pkg.extension_loader = fake
+    original = I.data_dir
+    I.data_dir = lambda: os.path.join(root, "data")
+    captured = {}
+    try:
+        item = Managed("demo", "Demo", "Demo", "1.0.0", "heath-toby/demo",
+                       os.path.join(extensions, "demo"), True)
+        result = I.Result("Demo", "demo", "1.0.0", "2.0.0")
+        workdir = os.path.join(root, "work")
+        os.makedirs(workdir)
+        shutil.copy2(tarball, os.path.join(workdir, "release.tar.gz"))
+        # self_source_id matches, so this is the updater updating itself.
+        I.Installer(extensions, self_source_id="demo")._install(
+            item,
+            os.path.join(workdir, "release.tar.gz"),
+            workdir,
+            result,
+            lambda _f: None,
+            lambda outcome: captured.setdefault("result", outcome),
+        )
+    finally:
+        I.data_dir = original
+        if real is not None:
+            sys.modules["orca.extension_loader"] = real
+        if real_attr is not None:
+            orca_pkg.extension_loader = real_attr
+
+    outcome = captured["result"]
+    check("updating itself succeeds", outcome.ok, True)
+    check("updating itself is approved", len(loader.approved), 1)
+    check("updating itself does NOT reload", loader.reloads, [])
+    check("updating itself asks for a restart", outcome.restart_required, True)
+    installed = open(os.path.join(extensions, "demo", "__init__.py"), encoding="utf-8").read()
+    check("updating itself writes the new version", installed, 'VERSION = "2.0.0"\n')
+finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# (f) A release that does not contain the package at all.
 loader = FakeLoader()
 root, extensions = install_fixture()
 try:

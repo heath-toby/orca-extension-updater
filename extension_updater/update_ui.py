@@ -320,12 +320,31 @@ def summarise(results: list[Result]) -> list[str]:
         )
     elif updated:
         # Each updated extension was reloaded and proved to load, so the work
-        # is already live. Say so rather than implying a restart is required.
-        lines.append(
-            "These updates are already active; each one was reloaded and checked. "
-            "A restart is only needed for the updater itself, and is worth doing "
-            "anyway after several add-ons have changed."
-        )
+        # is already live -- with one exception, which has to be said rather
+        # than glossed over, because otherwise "already active" would be a
+        # claim about the very add-on it is not true of.
+        pending = [r for r in updated if r.restart_required]
+        if pending:
+            names = ", ".join(r.label for r in pending)
+            live = [r for r in updated if not r.restart_required]
+            if live:
+                lines.append(
+                    f"{', '.join(r.label for r in live)} is already active; it was "
+                    "reloaded and checked."
+                    if len(live) == 1
+                    else f"{', '.join(r.label for r in live)} are already active; "
+                    "each was reloaded and checked."
+                )
+            lines.append(
+                f"{names} cannot reload itself, so restart Orca to run the new "
+                "version. It is installed and approved already."
+            )
+        else:
+            lines.append(
+                "These updates are already active; each one was reloaded and "
+                "checked. A restart is only needed for the updater itself, and is "
+                "worth doing anyway after several add-ons have changed."
+            )
 
     if any(r.ok and r.has_install_script for r in updated):
         lines.append(
@@ -398,8 +417,10 @@ class Flow:
         log: Callable[[str], None] | None = None,
         remember_size: Callable[[str, int], None] | None = None,
         expected_size: Callable[[str], int] | None = None,
+        self_source_id: str = "",
     ) -> None:
         self._extensions_dir = extensions_dir
+        self._self_source_id = self_source_id
         self._log = log or (lambda _message: None)
         self._remember_size = remember_size or (lambda _repo, _size: None)
         self._expected_size = expected_size or (lambda _repo: 0)
@@ -439,7 +460,9 @@ class Flow:
         self._busy = True
         self._queue = list(chosen)
         self._results = []
-        self._installer = Installer(self._extensions_dir, self._log)
+        self._installer = Installer(
+            self._extensions_dir, self._log, self_source_id=self._self_source_id
+        )
 
         _suspend_events()
         self._progress = ProgressDialog(len(self._queue))

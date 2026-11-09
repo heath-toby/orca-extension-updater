@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1
+
+**Updating the updater no longer reloads the updater.**
+
+Every other add-on is reloaded after it is installed, which is how a release
+that will not load gets caught while a rollback is still possible. Doing that
+to this extension would purge this very module from `sys.modules` and
+re-import it while the code running the reload is still executing inside the
+old one -- and Orca's reload tears down and re-registers every extension's
+commands on the way through. The new version is installed and approved
+instead, and the completion dialog says plainly that a restart is needed to
+run it, rather than calling it active when it is not.
+
+Also fixes a test that compared staged bytes against the *installed* copy of
+an add-on rather than against its source, so it failed whenever a version had
+been bumped without reinstalling -- which said nothing about whether the copy
+was faithful, the thing it was meant to check.
+
 ## 1.0.0
 
 First release.

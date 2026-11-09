@@ -187,6 +187,24 @@ check("an add-on with its own install.sh is flagged",
 check("an empty run says nothing was updated",
       summary([]), "Nothing was updated.")
 
+# The updater updating itself: installed, but not live until a restart. The
+# summary must not claim it is already active.
+self_update = Result("Extension Updater", "extension_updater", "1.0.0", "1.0.1",
+                     ok=True, restart_required=True)
+text = summary([self_update])
+check("a self-update says it cannot reload itself",
+      "cannot reload itself" in text, True)
+check("a self-update tells you to restart", "restart Orca" in text, True)
+check("a self-update is not claimed to be active",
+      "already active" in text, False)
+check("a self-update says it is installed", "installed and approved" in text, True)
+
+text = summary([ok_result, self_update])
+check("a mixed self-update separates live from pending",
+      "Polyglot is already active" in text and "cannot reload itself" in text, True)
+check("a mixed self-update does not call everything active",
+      "These updates are already active" in text, False)
+
 
 width = max(len(row[0]) for row in rows)
 print()
