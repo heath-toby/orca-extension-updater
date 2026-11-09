@@ -55,6 +55,14 @@ link in Preferences → User Extensions → Info. Extensions that declare no
 website, or whose version is not a plain `1.2.3`, are listed as unmanaged and
 left alone.
 
+Most extensions in the wild declare no website, so you can name one yourself:
+in this add-on's settings, **Repositories for add-ons that do not declare one**
+maps an installed extension to its repository. Use the installed name — a
+folder such as `polyglot`, or a file such as `resource_monitor.py` — and
+`owner/repository` or the project's address. A name you give wins over a
+declared one, so it is also how to correct metadata that points somewhere
+stale. The repository still has to publish releases or version tags.
+
 Two optional module-level declarations control what an update installs. Both
 are read with `ast`, never executed, and any entry that is not a plain file or
 directory name beside the source is discarded:

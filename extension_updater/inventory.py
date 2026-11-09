@@ -21,7 +21,11 @@ _GITHUB_URL = re.compile(
     r"^https?://(?:www\.)?github\.com/"
     r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/"
     r"(?P<repo>[A-Za-z0-9._-]+?)"
-    r"(?:\.git)?/?$"
+    r"(?:\.git)?/?$",
+    # The host is case-insensitive, and people type "GitHub.com". The captured
+    # owner and repository keep their own case, which matters: the repository
+    # is "Clock", not "clock".
+    re.IGNORECASE,
 )
 
 # A release tag we can compare. Orca's VERSION strings are bare ("2.10.0")
@@ -83,6 +87,49 @@ def parse_repo(website: str) -> str | None:
     return f"{match.group('owner')}/{repo}"
 
 
+def parse_repo_spec(text: str) -> str | None:
+    """Returns "owner/repo" from something a person typed, or None.
+
+    Deliberately generous about the form, because this one is typed by hand
+    rather than read out of metadata: a full project URL and a bare
+    "owner/repo" both work, and so does a trailing slash or a .git suffix.
+    It is strict about the *shape* for the same reason `parse_repo` is --
+    the result is interpolated into an API path.
+    """
+
+    if not text:
+        return None
+    candidate = text.strip()
+    if not candidate:
+        return None
+    if "://" in candidate or candidate.lower().startswith("github.com/"):
+        if not candidate.lower().startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+        return parse_repo(candidate)
+    # An absolute path is not a repository. Without this, "/etc/passwd" became
+    # "etc/passwd" and would have been asked of the API as though it were one.
+    if candidate.startswith("/"):
+        return None
+    return parse_repo(f"https://github.com/{candidate.strip('/')}")
+
+
+def valid_source_id(text: str) -> bool:
+    """Returns whether this looks like an installed extension's source id.
+
+    That is a bare filename: a package directory name, or a module name with
+    its .py extension. Never a path.
+    """
+
+    if not text or text in (".", ".."):
+        return False
+    candidate = text.strip()
+    if candidate != text or not candidate:
+        return False
+    if candidate.startswith((".", "_")) or "/" in candidate or "\\" in candidate:
+        return False
+    return all(ch.isalnum() or ch in "._-" for ch in candidate)
+
+
 def parse_version(text: str) -> tuple[int, ...] | None:
     """Returns a comparable version tuple, or None if it is not one.
 
@@ -118,21 +165,41 @@ def is_newer(remote: str, installed: str) -> bool:
     return remote_parts > installed_parts
 
 
-def discover(extensions: str | None = None) -> tuple[list[Managed], list[Unmanaged]]:
-    """Returns the installed extensions, split by whether we can check them."""
+def discover(
+    extensions: str | None = None,
+    overrides: dict | None = None,
+) -> tuple[list[Managed], list[Unmanaged]]:
+    """Returns the installed extensions, split by whether we can check them.
+
+    `overrides` maps a source id to a repository the user named by hand. It
+    exists because most extensions do not declare `WEBSITE` -- only this
+    family of add-ons does -- and without it a third-party add-on could never
+    be checked, however willing its author. A named repository **wins** over
+    a declared one: it is the more recent and more deliberate statement of
+    where this copy came from, and it is the only way to correct metadata
+    that points somewhere stale.
+    """
 
     from orca import extension_loader
 
     directory = extensions if extensions is not None else extensions_dir()
+    named = {}
+    for source_id, spec in (overrides or {}).items():
+        if not valid_source_id(str(source_id)):
+            continue
+        repo = parse_repo_spec(str(spec))
+        if repo is not None:
+            named[str(source_id)] = repo
+
     managed: list[Managed] = []
     unmanaged: list[Unmanaged] = []
 
     for info in extension_loader.get_loader().discover_user_extensions(directory):
         label = info.group_label or info.class_name or info.filename
-        repo = parse_repo(info.website)
+        repo = named.get(info.filename) or parse_repo(info.website)
         if repo is None:
             reason = (
-                "declares no repository"
+                "declares no repository; name one in Extension Updater's settings"
                 if not info.website
                 else f"repository is not a GitHub project: {info.website}"
             )

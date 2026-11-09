@@ -99,6 +99,50 @@ for remote, installed, want in [
     check(f"is_newer({remote!r}, {installed!r})", inv.is_newer(remote, installed), want)
 
 
+# --- Repositories named by hand ----------------------------------------------
+# Most extensions do not declare WEBSITE, so this is the only route by which a
+# third-party add-on can be followed at all.
+
+for spec, want in [
+    ("whoknowsla/resource-monitor-for-orca", "whoknowsla/resource-monitor-for-orca"),
+    ("https://github.com/whoknowsla/resource-monitor-for-orca",
+     "whoknowsla/resource-monitor-for-orca"),
+    ("http://github.com/owner/repo", "owner/repo"),
+    ("github.com/owner/repo", "owner/repo"),
+    ("GitHub.com/owner/repo", "owner/repo"),
+    ("owner/repo.git", "owner/repo"),
+    ("owner/repo/", "owner/repo"),
+    ("  owner/repo  ", "owner/repo"),
+    # Not enough, or too much, to name a repository.
+    ("owner", None),
+    ("owner/repo/extra", None),
+    ("owner/..", None),
+    ("../etc/passwd", None),
+    ("/etc/passwd", None),
+    ("https://gitlab.com/owner/repo", None),
+    ("", None),
+]:
+    check(f"parse_repo_spec({spec!r})", inv.parse_repo_spec(spec), want)
+
+for source_id, want in [
+    ("polyglot", True),
+    ("resource_monitor.py", True),
+    ("audio_themes", True),
+    ("a-b.c", True),
+    # Orca's own loader skips anything starting with an underscore, and a
+    # dotfile is not a source id either.
+    ("_private", False),
+    (".hidden", False),
+    # A path is not a source id, and this one is about to be looked up by name.
+    ("sub/polyglot", False),
+    ("..", False),
+    ("", False),
+    ("  polyglot", False),
+    ("polyglot ", False),
+]:
+    check(f"valid_source_id({source_id!r})", inv.valid_source_id(source_id), want)
+
+
 # --- Against what is actually installed --------------------------------------
 
 managed, unmanaged = inv.discover()
@@ -125,6 +169,35 @@ check(
     sorted(set(by_id) & {e.source_id for e in unmanaged}),
     [],
 )
+
+# A named repository makes an otherwise unmanaged add-on checkable.
+unmanaged_ids = {e.source_id for e in unmanaged}
+if unmanaged_ids:
+    victim = sorted(unmanaged_ids)[0]
+    named_managed, named_unmanaged = inv.discover(
+        overrides={victim: "someone/some-add-on"}
+    )
+    named = {e.source_id: e for e in named_managed}
+    check(f"naming a repository makes {victim} checkable", victim in named, True)
+    if victim in named:
+        check("the named repository is used", named[victim].repo, "someone/some-add-on")
+    check(f"{victim} is no longer listed as unmanaged",
+          victim in {e.source_id for e in named_unmanaged}, False)
+
+    # Rubbish must not be accepted, or the check would ask GitHub for a path
+    # built out of it.
+    for bad in ({victim: "not a repo"}, {victim: "../../etc"}, {"../x": "a/b"}):
+        still_managed, _still_unmanaged = inv.discover(overrides=bad)
+        check(f"a bad override is ignored: {bad}",
+              victim in {e.source_id for e in still_managed}, False)
+
+# A named repository overrides a declared one, so stale metadata can be fixed.
+if by_id:
+    first = sorted(by_id)[0]
+    overridden, _ = inv.discover(overrides={first: "someone/elsewhere"})
+    found = {e.source_id: e for e in overridden}
+    check("a named repository beats a declared one",
+          found[first].repo if first in found else None, "someone/elsewhere")
 
 expected = {
     "polyglot": "heath-toby/polyglot-for-orca",

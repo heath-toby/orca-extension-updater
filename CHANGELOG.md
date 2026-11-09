@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.0
+
+**You can now name the repository for an add-on that does not declare one.**
+
+Only this family of add-ons declares Orca's `WEBSITE` field, so until now a
+third-party extension could never be followed, however willing its author. A
+new dictionary setting, *Repositories for add-ons that do not declare one*,
+maps an installed extension to `owner/repository`. A name you give wins over
+a declared one, which is also the way to correct metadata pointing somewhere
+stale.
+
+It accepts what people actually type: `owner/repo`, a full project address,
+`github.com/owner/repo`, a trailing slash, a `.git` suffix, and any
+capitalisation of the host. It rejects anything that is not exactly an owner
+and a repository, because the result is interpolated into an API path --
+`/etc/passwd` was being accepted as `etc/passwd` while that was being written,
+and now is not.
+
+The repository still has to publish releases or `vX.Y.Z` tags; naming it does
+not conjure a version to compare against.
+
 ## 1.0.2
 
 **An update stopped by GitHub's hourly limit now says so.**

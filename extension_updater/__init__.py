@@ -27,11 +27,13 @@ from orca.extension_preferences import ExtensionPreference
 from .inventory import discover as _discover
 from .inventory import extensions_dir as _extensions_dir
 from .inventory import is_newer as _is_newer
+from .inventory import parse_repo_spec as _parse_repo_spec
+from .inventory import valid_source_id as _valid_source_id
 from .scheduler import INTERVAL_DEFAULT as _INTERVAL_DEFAULT
 from .scheduler import INTERVALS as _INTERVALS
 from .scheduler import Scheduler as _Scheduler
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 # Where the log goes. Never inside the package: Orca hashes every file in an
 # extension's directory, so a log written there would un-approve the add-on
@@ -63,7 +65,7 @@ class ExtensionUpdater(Extension):
         "checked before it replaces anything, and the previous version is "
         "restored if it does not load."
     )
-    VERSION = "1.0.2"  # keep in sync with __version__; read by AST, must be a literal
+    VERSION = "1.1.0"  # keep in sync with __version__; read by AST, must be a literal
     AUTHOR = "Toby"
     WEBSITE = "https://github.com/heath-toby/orca-extension-updater"
 
@@ -99,6 +101,26 @@ class ExtensionUpdater(Extension):
             ),
             ExtensionPreference.boolean(
                 "debug", "Log diagnostics to orca/extension-updater/debug.log", False
+            ),
+            # Most extensions do not declare WEBSITE -- only this family of
+            # add-ons does -- so without this there is no way to follow a
+            # third-party add-on at all, however willing its author.
+            ExtensionPreference.dictionary(
+                "repository-overrides",
+                "Repositories for add-ons that do not declare one",
+                {},
+                key_label="Extension",
+                value_label="GitHub repository",
+                key_validator=_valid_source_id,
+                value_validator=lambda text: _parse_repo_spec(text) is not None,
+                key_error=(
+                    "Use the extension's installed name, as it appears in "
+                    "~/.local/share/orca/extensions: a folder name such as "
+                    "polyglot, or a file name such as resource_monitor.py."
+                ),
+                value_error=(
+                    "Use owner/repository, or the project's GitHub address."
+                ),
             ),
         ]
 
@@ -257,7 +279,9 @@ class ExtensionUpdater(Extension):
 
         directory = _extensions_dir()
         try:
-            managed, unmanaged = _discover(directory)
+            managed, unmanaged = _discover(
+                directory, self.settings.get("repository-overrides", {})
+            )
         except Exception as error:  # pylint: disable=broad-exception-caught
             self.log(f"could not read the installed extensions: {error}")
             if spoken:
