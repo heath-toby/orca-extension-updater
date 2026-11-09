@@ -483,6 +483,75 @@ finally:
     shutil.rmtree(root, ignore_errors=True)
 
 
+# (e2) A single-FILE extension, not a package. Resource Monitor is one, and
+# this path had never been exercised: the source id carries the .py extension,
+# the candidate is a file rather than a directory, and the swap renames a file.
+loader = FakeLoader()
+root = tempfile.mkdtemp(prefix="eu-singlefile-")
+try:
+    extensions = os.path.join(root, "extensions")
+    os.makedirs(extensions)
+    installed_file = os.path.join(extensions, "demo_mod.py")
+    with open(installed_file, "w", encoding="utf-8") as handle:
+        handle.write('VERSION = "1.0.0"\n')
+
+    release = os.path.join(root, "rel", "heath-toby-demo-abc123")
+    os.makedirs(release)
+    with open(os.path.join(release, "demo_mod.py"), "w", encoding="utf-8") as handle:
+        handle.write('VERSION = "2.0.0"\n')
+    tarball = os.path.join(root, "single.tar.gz")
+    with tarfile.open(tarball, "w:gz") as archive:
+        archive.add(release, arcname="heath-toby-demo-abc123")
+
+    fake = types.ModuleType("orca.extension_loader")
+    fake.get_loader = lambda: loader
+    real = sys.modules.get("orca.extension_loader")
+    import orca as orca_pkg
+
+    real_attr = getattr(orca_pkg, "extension_loader", None)
+    sys.modules["orca.extension_loader"] = fake
+    orca_pkg.extension_loader = fake
+    original = I.data_dir
+    I.data_dir = lambda: os.path.join(root, "data")
+    captured = {}
+    try:
+        item = Managed("demo_mod.py", "DemoMod", "Demo Mod", "1.0.0",
+                       "heath-toby/demo", installed_file, False)
+        result = I.Result("Demo Mod", "demo_mod.py", "1.0.0", "2.0.0")
+        workdir = os.path.join(root, "work")
+        os.makedirs(workdir)
+        shutil.copy2(tarball, os.path.join(workdir, "release.tar.gz"))
+        I.Installer(extensions)._install(
+            item,
+            os.path.join(workdir, "release.tar.gz"),
+            workdir,
+            result,
+            lambda _f: None,
+            lambda outcome: captured.setdefault("result", outcome),
+        )
+    finally:
+        I.data_dir = original
+        if real is not None:
+            sys.modules["orca.extension_loader"] = real
+        if real_attr is not None:
+            orca_pkg.extension_loader = real_attr
+
+    outcome = captured["result"]
+    check("a single-file extension updates", outcome.ok, True)
+    check("a single-file update reports no error", outcome.error, None)
+    check("a single-file extension is still a file",
+          os.path.isfile(installed_file), True)
+    check("a single-file extension has the new contents",
+          open(installed_file, encoding="utf-8").read(), 'VERSION = "2.0.0"\n')
+    check("a single-file extension is approved by its full filename",
+          [os.path.basename(path) for path in loader.approved], ["demo_mod.py"])
+    check("a single-file extension is reloaded", loader.reloads, ["demo_mod.py"])
+    check("a single-file extension keeps a backup",
+          os.path.isfile(os.path.join(root, "data", "backups", "demo_mod.py")), True)
+finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
 # (f) A release that does not contain the package at all.
 loader = FakeLoader()
 root, extensions = install_fixture()
