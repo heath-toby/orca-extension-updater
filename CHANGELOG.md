@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.2
+
+**An update stopped by GitHub's hourly limit now says so.**
+
+Found the hard way: a run of eight updates installed seven and failed the
+last one with "GitHub returned 403 for the download", which reads like a
+fault to investigate rather than something that fixes itself in half an hour.
+The allowance was simply spent -- a check costs one request per add-on and
+each update costs one more, so with nine add-ons a check plus a round of
+updates is a third of the sixty requests an hour allows.
+
+- The download path now recognises a refusal for the rate limit, as the
+  lookup path already did, and both now say when the limit resets.
+- The allowance is tracked from the headers every response already carries,
+  so a request that is certain to be refused is not made at all.
+- A check that could not complete no longer reports "no extension updates
+  available", which was claiming an answer it did not have. It now says it
+  could not find out, and why.
+- The completion dialog adds one line distinguishing a wait from a fault:
+  press Orca+Shift+U again once the limit resets and the rest will install.
+
 ## 1.0.1
 
 **Updating the updater no longer reloads the updater.**

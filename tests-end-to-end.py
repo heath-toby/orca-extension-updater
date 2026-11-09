@@ -137,6 +137,14 @@ GLib.timeout_add_seconds(120, lambda: (loop.quit(), False)[1])
 loop.run()
 
 try:
+    lookup_error = captured.get("lookup_error") or ""
+    if "hourly limit" in lookup_error:
+        # A spent allowance is not a code failure, and reporting it as one
+        # would train us to ignore a red row.
+        print(f"\n  SKIPPED: {lookup_error}.")
+        print("  Re-run once the limit resets; this test needs two requests.")
+        sys.exit(0)
+
     check("the release tag was found", "lookup_error" in captured, False)
     result = captured.get("result")
     check("the update ran to completion", result is not None, True)

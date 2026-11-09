@@ -346,6 +346,15 @@ def summarise(results: list[Result]) -> list[str]:
                 "worth doing anyway after several add-ons have changed."
             )
 
+    # A run cut short by the hourly allowance is not a fault to investigate,
+    # it is a wait. Say which it was, because "GitHub refused the request"
+    # sends the user looking for a problem that will fix itself.
+    if any("hourly limit" in (r.error or "") for r in failed):
+        lines.append(
+            "That is a wait, not a fault: press Orca+Shift+U again once the limit "
+            "resets and the rest will install."
+        )
+
     if any(r.ok and r.has_install_script for r in updated):
         lines.append(
             "If an updated add-on has gained a new dependency, run its own "

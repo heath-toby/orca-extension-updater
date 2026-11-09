@@ -31,7 +31,7 @@ from .scheduler import INTERVAL_DEFAULT as _INTERVAL_DEFAULT
 from .scheduler import INTERVALS as _INTERVALS
 from .scheduler import Scheduler as _Scheduler
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # Where the log goes. Never inside the package: Orca hashes every file in an
 # extension's directory, so a log written there would un-approve the add-on
@@ -63,7 +63,7 @@ class ExtensionUpdater(Extension):
         "checked before it replaces anything, and the previous version is "
         "restored if it does not load."
     )
-    VERSION = "1.0.1"  # keep in sync with __version__; read by AST, must be a literal
+    VERSION = "1.0.2"  # keep in sync with __version__; read by AST, must be a literal
     AUTHOR = "Toby"
     WEBSITE = "https://github.com/heath-toby/orca-extension-updater"
 
@@ -293,18 +293,37 @@ class ExtensionUpdater(Extension):
             if not available:
                 self.log("no updates available")
                 if spoken:
-                    speak(
-                        "No extension updates available."
-                        if not problems
-                        else f"No extension updates available. {len(problems)} "
-                        "could not be checked."
-                    )
+                    limited = [p for p in problems if "hourly limit" in p]
+                    if limited:
+                        # Do not report "no updates available" when the truth
+                        # is that we could not find out. With nine add-ons a
+                        # check is a sixth of the hourly allowance, so this is
+                        # a state worth naming rather than papering over.
+                        speak(
+                            f"Could not check for updates: {limited[0].split(': ', 1)[-1]}."
+                        )
+                    elif problems:
+                        speak(
+                            "No extension updates available. "
+                            f"{len(problems)} could not be checked."
+                        )
+                    else:
+                        speak("No extension updates available.")
                 return
 
             self.log(
                 "updates available: "
                 + ", ".join(f"{a.item.label} {a.to_version}" for a in available)
             )
+
+            from .github import budget
+
+            remaining, _reset = budget()
+            if remaining is not None and remaining < len(available):
+                self.log(
+                    f"only {remaining} GitHub requests left for {len(available)} "
+                    "updates; the last ones will have to wait"
+                )
             if self._flow is None:
                 self._flow = Flow(
                     directory,

@@ -16,6 +16,7 @@ context, so no worker thread of ours is involved.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 
 import gi
@@ -58,6 +59,72 @@ MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
 class Error(Exception):
     """A lookup or download failed. The message is user-facing."""
+
+
+# What GitHub last said about the hourly allowance. Every response carries it,
+# so tracking it costs nothing -- and a request for /rate_limit would itself
+# be spending the thing it asks about.
+_budget: dict[str, int | None] = {"remaining": None, "reset": None}
+
+
+def budget() -> tuple[int | None, int | None]:
+    """Returns (requests remaining, reset time), or (None, None) if unknown."""
+
+    return _budget["remaining"], _budget["reset"]
+
+
+def _note_budget(message: Soup.Message) -> None:
+    """Records the allowance from a response's headers."""
+
+    headers = message.get_response_headers()
+    for header, key in (("x-ratelimit-remaining", "remaining"), ("x-ratelimit-reset", "reset")):
+        raw = headers.get_one(header)
+        if raw is None:
+            continue
+        try:
+            _budget[key] = int(raw)
+        except ValueError:
+            pass
+
+
+def _exhausted() -> bool:
+    """Returns True when the allowance is known to be spent and not yet reset."""
+
+    remaining, reset = budget()
+    if remaining is None or remaining > 0:
+        return False
+    return reset is None or reset > time.time()
+
+
+def rate_limit_message() -> str:
+    """Says the allowance is spent, and when it comes back.
+
+    Worth the extra clause: without the reset time, "the rate limit is
+    exhausted" reads like a fault to investigate rather than something that
+    fixes itself shortly. With nine add-ons, a check plus a round of updates
+    is a third of the hourly allowance, so this is a state users will meet.
+    """
+
+    _remaining, reset = budget()
+    if reset:
+        minutes = int((reset - time.time()) // 60) + 1
+        if minutes > 0:
+            plural = "" if minutes == 1 else "s"
+            return (
+                "GitHub's hourly limit of 60 requests is used up; it resets in "
+                f"{minutes} minute{plural}"
+            )
+    return "GitHub's hourly limit of 60 requests is used up"
+
+
+def _rate_limited(message: Soup.Message) -> bool:
+    """Returns True when this response was refused for the allowance."""
+
+    status = int(message.get_status())
+    if status not in (403, 429):
+        return False
+    remaining = message.get_response_headers().get_one("x-ratelimit-remaining")
+    return remaining == "0"
 
 
 def _session() -> Soup.Session:
@@ -113,6 +180,10 @@ class Client:
     ) -> None:
         """GETs `path` and hands the decoded body, or an error string, to on_done."""
 
+        if _exhausted():
+            on_done(None, rate_limit_message())
+            return
+
         message = Soup.Message.new("GET", f"{API}{path}")
         if message is None:
             on_done(None, f"Could not build a request for {path}.")
@@ -133,15 +204,15 @@ class Client:
                 on_done(None, _describe(error))
                 return
 
+            _note_budget(message)
             status = message.get_status()
             if status == Soup.Status.NOT_FOUND:
                 on_done(None, "not found")
                 return
+            if _rate_limited(message):
+                on_done(None, rate_limit_message())
+                return
             if status == Soup.Status.FORBIDDEN or status == 429:
-                remaining = message.get_response_headers().get_one("x-ratelimit-remaining")
-                if remaining == "0":
-                    on_done(None, "GitHub's hourly rate limit is exhausted.")
-                    return
                 on_done(None, f"GitHub refused the request ({int(status)}).")
                 return
             if status != Soup.Status.OK:
@@ -257,9 +328,13 @@ class Client:
         `on_done` reports the true size so the caller can remember it.
         """
 
+        if _exhausted():
+            on_done(False, rate_limit_message(), 0)
+            return
+
         message = Soup.Message.new("GET", f"{API}/repos/{repo}/tarball/{tag}")
         if message is None:
-            on_done(False, "Could not build a download request.")
+            on_done(False, "Could not build a download request.", 0)
             return
         message.get_request_headers().append("Accept", "application/vnd.github+json")
 
@@ -280,6 +355,12 @@ class Client:
                 fail(_describe(error))
                 return
 
+            _note_budget(message)
+            if _rate_limited(message):
+                # This is the branch that reported a bare "403" and left the
+                # user with no idea the fix was simply to wait.
+                fail(rate_limit_message())
+                return
             if message.get_status() != Soup.Status.OK:
                 fail(f"GitHub returned {int(message.get_status())} for the download.")
                 return

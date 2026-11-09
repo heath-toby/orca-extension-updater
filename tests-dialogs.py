@@ -180,6 +180,26 @@ check("an unrecoverable failure names the recovery",
 check("an unrecoverable failure does not say things are active",
       "already active" in text, False)
 
+# A run cut short by the hourly allowance: a wait, not a fault.
+limited = Result("Wayland Clipboard", "wayland_clipboard", "1.2.0", "1.2.1", ok=False,
+                 error="GitHub's hourly limit of 60 requests is used up; it resets in 35 minutes")
+text = summary([ok_result, limited])
+check("a rate-limited run still reports what succeeded",
+      "Polyglot to 2.11.0" in text, True)
+check("a rate-limited run names the add-on left behind",
+      "Wayland Clipboard was not updated" in text, True)
+check("a rate-limited run says when the limit resets",
+      "35 minutes" in text, True)
+check("a rate-limited run calls it a wait, not a fault",
+      "a wait, not a fault" in text, True)
+check("a rate-limited run says how to finish it",
+      "press orca+shift+u again" in text.lower(), True)
+
+# An ordinary failure must NOT get the retry-after-reset advice.
+text = summary([failed])
+check("an ordinary failure is not called a wait",
+      "a wait, not a fault" in text, False)
+
 text = summary([ok_with_script])
 check("an add-on with its own install.sh is flagged",
       "dependency" in text, True)

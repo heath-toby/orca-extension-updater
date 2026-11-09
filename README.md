@@ -150,9 +150,17 @@ in there would un-approve the add-on on first write.
 ## Rate limits
 
 Unauthenticated GitHub allows 60 requests an hour. A check costs one request
-per managed add-on, so about nine here — comfortable even on the hourly
-setting. Conditional requests are not used, because a 304 still counts against
-the limit.
+per managed add-on — about nine here — and **each update costs one more**. So a
+check plus a full round of updates is roughly a third of the hour's allowance,
+and two or three rounds in quick succession will run it out.
+
+When that happens the add-on says so and says when the limit resets, rather
+than reporting a bare 403. The allowance is read from the headers every
+response already carries, so a request certain to be refused is not made.
+Press Orca+Shift+U again after the reset and the rest will install.
+
+Conditional requests are not used, because a 304 still counts against the
+limit.
 
 ## Tests
 
