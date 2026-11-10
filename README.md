@@ -167,26 +167,49 @@ in there would un-approve the add-on on first write.
   for rollback.
 - `staging/` — scratch space during an update, removed afterwards.
 
-## Rate limits
+## Where it looks, and why not the API
 
-Unauthenticated GitHub allows 60 requests an hour. A check costs one request
-per managed add-on — about nine here — and **each update costs one more**. So a
-check plus a full round of updates is roughly a third of the hour's allowance,
-and two or three rounds in quick succession will run it out.
+GitHub's API allows 60 requests an hour without a sign-in. A check costs one
+request per add-on and each update costs one more, so with ten add-ons a check
+and a full round of updates is nineteen of those sixty — and the add-on that
+runs out is always whichever sorts last. **So this add-on does not use the API
+at all.** Two routes are used instead, both measured answering 200 while the
+unauthenticated API was returning 403 for exhaustion:
 
-When that happens the add-on says so and says when the limit resets, rather
-than reporting a bare 403. The allowance is read from the headers every
-response already carries, so a request certain to be refused is not made, and
-a download refused for the limit stops the run instead of attempting the rest.
-Press Orca+Shift+U again after the reset and the rest will install.
+1. **The `gh` CLI**, when it is installed and signed in. It uses your own
+   token, which is allowed 5,000 requests an hour, and it is the only route
+   that honours GitHub's own idea of the *latest* release — so a pre-release
+   is never offered as an update. A check of nine repositories takes about 4.4
+   seconds and one request of the five thousand.
+2. **The releases and tags Atom feeds** on github.com, used when `gh` is
+   absent, signed out, or fails. These are not API endpoints: no
+   `x-ratelimit` headers, no allowance spent at all. The same check takes
+   about 2.2 seconds. A feed lists pre-releases beside releases, so the
+   highest version-like tag is taken rather than the first entry, and anything
+   that is not a plain `1.2.3` is skipped rather than guessed at.
 
-Release tags are remembered for fifteen minutes, so a second attempt spends
-its requests on downloads rather than on asking again. That window is shorter
-than the shortest check interval, so a scheduled check never answers from the
-cache.
+Downloads use `github.com/<repo>/archive/refs/tags/<tag>.tar.gz`, which is
+codeload rather than the API, so an update spends no allowance either.
 
-Conditional requests are not used, because a 304 still counts against the
-limit.
+The setting *Use the GitHub CLI for checks when it is installed* chooses
+between the two. It is on by default: not offering a pre-release to a screen
+reader user is worth four seconds.
+
+Release tags are remembered for fifteen minutes regardless, so pressing the
+key twice does not repeat the work. That window is shorter than the shortest
+check interval, so a scheduled check never answers from the cache.
+
+github.com can still refuse a burst of requests with a 403 or 429. That is
+reported as "try again shortly" rather than as a fault, and a refused download
+stops the run instead of attempting the rest.
+
+### Why NVDA never shows you this
+
+NVDA's add-on store fetches **one** aggregated index from NV Access, so it
+makes a single request however many add-ons you have and GitHub's per-repo
+limits never arise. There is no such index for extensions like these, so a
+per-repository check is the only option — which makes the choice of channel
+the thing that matters.
 
 ## Tests
 

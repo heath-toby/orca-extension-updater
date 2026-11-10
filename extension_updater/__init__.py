@@ -33,7 +33,7 @@ from .scheduler import INTERVAL_DEFAULT as _INTERVAL_DEFAULT
 from .scheduler import INTERVALS as _INTERVALS
 from .scheduler import Scheduler as _Scheduler
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # Where the log goes. Never inside the package: Orca hashes every file in an
 # extension's directory, so a log written there would un-approve the add-on
@@ -65,7 +65,7 @@ class ExtensionUpdater(Extension):
         "checked before it replaces anything, and the previous version is "
         "restored if it does not load."
     )
-    VERSION = "1.3.0"  # keep in sync with __version__; read by AST, must be a literal
+    VERSION = "1.4.0"  # keep in sync with __version__; read by AST, must be a literal
     AUTHOR = "Toby"
     WEBSITE = "https://github.com/heath-toby/orca-extension-updater"
 
@@ -98,6 +98,16 @@ class ExtensionUpdater(Extension):
             ),
             ExtensionPreference.boolean(
                 "check-at-startup", "Also check shortly after Orca starts", True
+            ),
+            # Neither channel spends GitHub's rationed API allowance, so this
+            # is about which answer you want rather than about cost. gh asks
+            # GitHub which release is *latest*, so a pre-release is never
+            # offered; the feeds are read without any sign-in and are quicker,
+            # but list pre-releases alongside releases.
+            ExtensionPreference.boolean(
+                "use-github-cli",
+                "Use the GitHub CLI for checks when it is installed",
+                True,
             ),
             ExtensionPreference.boolean(
                 "debug", "Log diagnostics to orca/extension-updater/debug.log", False
@@ -301,7 +311,8 @@ class ExtensionUpdater(Extension):
             return False
 
         self._checking = True
-        self._client = Client()
+        self._client = Client(use_gh=bool(self.settings.get("use-github-cli", True)))
+        self.log(f"checking through the {self._client.channel} channel")
         pending = list(managed)
         available: list[Available] = []
         problems: list[str] = []
@@ -340,14 +351,6 @@ class ExtensionUpdater(Extension):
                 + ", ".join(f"{a.item.label} {a.to_version}" for a in available)
             )
 
-            from .github import budget
-
-            remaining, _reset = budget()
-            if remaining is not None and remaining < len(available):
-                self.log(
-                    f"only {remaining} GitHub requests left for {len(available)} "
-                    "updates; the last ones will have to wait"
-                )
             if self._flow is None:
                 self._flow = Flow(
                     directory,

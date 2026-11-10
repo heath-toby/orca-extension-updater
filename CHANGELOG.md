@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.4.0
+
+**It no longer uses GitHub's rationed API at all.**
+
+Sixty requests an hour cannot support ten add-ons, and the add-on that lost
+was always whichever sorted last. Rather than ration more carefully, the
+checks now go somewhere that is not rationed. Both routes were measured with
+the unauthenticated API returning 403 for exhaustion; both answered 200.
+
+1. **The `gh` CLI**, when it is installed and signed in. It uses your own
+   token, which is allowed 5,000 requests an hour rather than 60, and it is
+   the only route that honours GitHub's own idea of the *latest* release, so a
+   pre-release is never offered as an update. A full check of nine
+   repositories took 4.4 seconds and one request of the five thousand.
+2. **The releases and tags Atom feeds** on github.com, used when `gh` is
+   absent, signed out, or fails for any reason. These are not API endpoints:
+   they carry no `x-ratelimit` headers and spend no allowance whatsoever. The
+   same check took 2.2 seconds. Because a feed lists pre-releases beside
+   releases, the highest version-like tag is taken rather than the first
+   entry, and anything that is not a plain `1.2.3` is skipped rather than
+   guessed at.
+3. **The REST API is gone**, for checks and for downloads alike. Archives now
+   come from `github.com/<repo>/archive/refs/tags/<tag>.tar.gz`, which is
+   codeload rather than the API.
+
+A new setting, *Use the GitHub CLI for checks when it is installed*, chooses
+between the two. It is on by default, because not offering a pre-release to a
+screen reader user is worth four seconds.
+
+The rate-limit machinery from 1.0.2 and 1.2.0 is reduced to what is still
+needed: github.com can still refuse a burst with 403 or 429, and that is
+reported as "try again shortly" rather than as a fault.
+
+### On NVDA
+
+Fair point, and the difference is architectural rather than a matter of care.
+NVDA's add-on store fetches **one** aggregated index from NV Access, so it
+makes a single request however many add-ons you have, and GitHub's per-repo
+limits never enter into it. There is no such index for these add-ons, so a
+per-repository check is the only option — which makes the choice of channel
+the thing that matters, and that is what this release fixes.
+
 ## 1.3.0
 
 **An add-on that was already failing to load no longer looks like a failed

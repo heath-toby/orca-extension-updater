@@ -1,62 +1,85 @@
-"""Asynchronous GitHub release lookups and tarball downloads.
+"""Finding releases and fetching them, without spending GitHub's API allowance.
 
-Every call here returns immediately and reports its result through a callback
-on the GLib main loop. That is the whole point of the module and it is not a
-stylistic preference: this add-on runs inside Orca, and two separate bugs in
-this family of add-ons were a blocking call made on Orca's main loop -- a
-nine-second clipboard read and a forty-nine-second braille table change, both
-of which froze speech outright. A network call is more likely to stall than
-either, and orca.service ships WatchdogSec=10, so a blocking download would
-not merely stall speech but have systemd kill Orca mid-update.
+Three channels exist and this module deliberately prefers the two that are
+not rationed:
 
-libsoup does the work on its own threads and hands the result back on the main
-context, so no worker thread of ours is involved.
+1. **The ``gh`` CLI**, when it is installed and signed in. It uses the user's
+   own token, which is allowed 5,000 requests an hour rather than 60, and it
+   is the only channel that honours GitHub's own idea of the *latest* release
+   (drafts and pre-releases excluded).
+2. **The releases and tags Atom feeds** on github.com. These are not API
+   endpoints: they carry no ``x-ratelimit`` headers and spend no allowance at
+   all. Measured, not assumed -- with the unauthenticated API returning 403
+   for exhaustion, ``releases.atom`` still returned 200.
+3. **The REST API is not used.** Sixty requests an hour cannot support ten
+   add-ons checked and updated more than twice, which is how this add-on came
+   to fail on whichever extension sorted last.
+
+Downloads go to ``github.com/<repo>/archive/refs/tags/<tag>.tar.gz`` for the
+same reason: that is codeload, not the API, and it answered 200 while the API
+was refusing everything.
+
+Every call returns immediately and reports through a callback on the GLib main
+loop. That is not a style choice: this runs inside Orca, where two separate
+bugs in this family of add-ons were a blocking call on the main loop, and
+``orca.service`` ships ``WatchdogSec=10``.
 """
 
 from __future__ import annotations
 
-import json
+import re
+import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import gi
 
 gi.require_version("Soup", "3.0")
 from gi.repository import Gio, GLib, Soup  # noqa: E402
 
-API = "https://api.github.com"
+GITHUB = "https://github.com"
 
-# Identifies this client and nothing else. Deliberately carries no address:
-# a service asking automated clients for contact details is not a reason to
-# hand over the user's email.
+# Identifies this client and nothing else. Deliberately carries no address: a
+# service asking automated clients for contact details is not a reason to hand
+# over the user's email.
 USER_AGENT = "orca-extension-updater"
 
-# A stalled connection must fail, not hang. libsoup's own timeouts cover the
-# connect and the idle gap; the deadline below covers the whole operation,
-# including a server that dribbles bytes forever without ever going idle.
 _CONNECT_TIMEOUT_SECONDS = 15
 _IDLE_TIMEOUT_SECONDS = 20
 _REQUEST_DEADLINE_SECONDS = 60
 _DOWNLOAD_DEADLINE_SECONDS = 300
+_GH_DEADLINE_SECONDS = 30
 
 _CHUNK = 64 * 1024
 
-# How long a release tag stays usable without asking again.
-#
-# This exists because of how the allowance is actually spent: a check costs
-# one request per add-on, and a round of updates costs one more each, so with
-# ten add-ons a check followed by updating them all is nineteen of the sixty
-# requests an hour allows. Retry that twice and the last add-on in the run
-# fails for want of a request -- which is exactly what happened in the field,
-# always to the last one alphabetically.
-#
-# Fifteen minutes is chosen against the shortest check interval, an hour: a
-# scheduled check never finds the cache warm, so this only ever saves the
-# requests spent by pressing the key again, which is the case that was
-# exhausting the allowance.
+# What to assume a tarball weighs when we have never fetched this repository
+# before. The add-ons in this family run from roughly 15 KB to 2.5 MB, so this
+# is a middling guess: too high makes the bar lag then jump, too low pins it at
+# the ceiling. The real size is remembered after the first download.
+DEFAULT_ESTIMATE_BYTES = 192 * 1024
+
+# How far an estimated fraction may advance before the stream actually ends.
+_ESTIMATE_CEILING = 0.98
+
+# A tarball for one of these add-ons is kilobytes to a couple of megabytes.
+# The cap is not about disk: it is about not reading an unbounded stream into
+# the screen reader's own process because a URL pointed somewhere unexpected.
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
+# How long a release tag stays usable without asking again. Fifteen minutes is
+# measured against the shortest check interval, an hour, so a scheduled check
+# never answers from the cache; it only saves the requests spent by pressing
+# the key again.
 TAG_CACHE_SECONDS = 900
 
+# Tag names appear in both feeds as .../releases/tag/<tag>.
+_FEED_TAG = re.compile(r"/releases/tag/([^\"'<>\s]+)")
+
 _tag_cache: dict[str, tuple[str, float]] = {}
+
+
+class Error(Exception):
+    """A lookup or download failed. The message is user-facing."""
 
 
 def clear_tag_cache() -> None:
@@ -78,90 +101,58 @@ def cached_tag(repo: str) -> str | None:
     return tag
 
 
-# What to assume a tarball weighs when we have never fetched this repository
-# before. The add-ons in this family run from roughly 30 KB to 160 KB, so this
-# is a little above the largest of them: a guess that is too high makes the bar
-# lag and then jump at the end, which is better than one that is too low and
-# sits pinned at the ceiling for most of the download.
-DEFAULT_ESTIMATE_BYTES = 192 * 1024
+def gh_path() -> str | None:
+    """Returns the path to the gh CLI, or None if it is not installed."""
 
-# How far an estimated fraction may advance before the stream actually ends.
-_ESTIMATE_CEILING = 0.98
-
-# A tarball for one of these add-ons is tens of kilobytes. The cap is not
-# about disk, it is about not reading an unbounded stream into memory inside
-# the screen reader's own process because a URL pointed somewhere unexpected.
-MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
-
-
-class Error(Exception):
-    """A lookup or download failed. The message is user-facing."""
-
-
-# What GitHub last said about the hourly allowance. Every response carries it,
-# so tracking it costs nothing -- and a request for /rate_limit would itself
-# be spending the thing it asks about.
-_budget: dict[str, int | None] = {"remaining": None, "reset": None}
-
-
-def budget() -> tuple[int | None, int | None]:
-    """Returns (requests remaining, reset time), or (None, None) if unknown."""
-
-    return _budget["remaining"], _budget["reset"]
-
-
-def _note_budget(message: Soup.Message) -> None:
-    """Records the allowance from a response's headers."""
-
-    headers = message.get_response_headers()
-    for header, key in (("x-ratelimit-remaining", "remaining"), ("x-ratelimit-reset", "reset")):
-        raw = headers.get_one(header)
-        if raw is None:
-            continue
-        try:
-            _budget[key] = int(raw)
-        except ValueError:
-            pass
-
-
-def _exhausted() -> bool:
-    """Returns True when the allowance is known to be spent and not yet reset."""
-
-    remaining, reset = budget()
-    if remaining is None or remaining > 0:
-        return False
-    return reset is None or reset > time.time()
+    return shutil.which("gh")
 
 
 def rate_limit_message() -> str:
-    """Says the allowance is spent, and when it comes back.
+    """Says github.com is refusing requests for volume, in plain terms."""
 
-    Worth the extra clause: without the reset time, "the rate limit is
-    exhausted" reads like a fault to investigate rather than something that
-    fixes itself shortly. With nine add-ons, a check plus a round of updates
-    is a third of the hourly allowance, so this is a state users will meet.
-    """
-
-    _remaining, reset = budget()
-    if reset:
-        minutes = int((reset - time.time()) // 60) + 1
-        if minutes > 0:
-            plural = "" if minutes == 1 else "s"
-            return (
-                "GitHub's hourly limit of 60 requests is used up; it resets in "
-                f"{minutes} minute{plural}"
-            )
-    return "GitHub's hourly limit of 60 requests is used up"
+    return (
+        "GitHub is refusing requests for the moment because too many have been "
+        "made. Try again shortly"
+    )
 
 
 def _rate_limited(message: Soup.Message) -> bool:
-    """Returns True when this response was refused for the allowance."""
+    """Returns True when this response was refused for request volume."""
 
-    status = int(message.get_status())
-    if status not in (403, 429):
-        return False
-    remaining = message.get_response_headers().get_one("x-ratelimit-remaining")
-    return remaining == "0"
+    return int(message.get_status()) in (403, 429)
+
+
+def best_tag(candidates: Sequence[str]) -> str | None:
+    """Returns the highest version-like tag from `candidates`.
+
+    The feeds list newest first and in practice that matches a version sort,
+    but sorting by version is what the answer actually depends on, so it is
+    what is done. Anything that is not a plain ``1.2.3`` -- a date tag, a code
+    name, a release candidate -- is skipped rather than guessed at.
+    """
+
+    from .inventory import parse_version
+
+    best, best_parts = None, None
+    for candidate in candidates:
+        parts = parse_version(candidate)
+        if parts is None:
+            continue
+        if best_parts is None or parts > best_parts:
+            best, best_parts = candidate, parts
+    return best
+
+
+def parse_feed_tags(xml: str) -> list[str]:
+    """Returns the tag names named by a releases or tags Atom feed."""
+
+    seen, tags = set(), []
+    for tag in _FEED_TAG.findall(xml):
+        unescaped = GLib.Uri.unescape_string(tag, None) or tag
+        if unescaped not in seen:
+            seen.add(unescaped)
+            tags.append(unescaped)
+    return tags
 
 
 def _session() -> Soup.Session:
@@ -173,8 +164,6 @@ def _session() -> Soup.Session:
 
 
 def _deadline(cancellable: Gio.Cancellable, seconds: int) -> int:
-    """Cancels `cancellable` after `seconds`. Returns the timeout source id."""
-
     def fire() -> bool:
         cancellable.cancel()
         return False
@@ -183,22 +172,31 @@ def _deadline(cancellable: Gio.Cancellable, seconds: int) -> int:
 
 
 class Client:
-    """Issues the API calls this add-on needs, one at a time per instance."""
+    """Finds and fetches releases. One operation at a time per instance."""
 
-    def __init__(self) -> None:
+    def __init__(self, use_gh: bool = True) -> None:
         self._session = _session()
         self._cancellable: Gio.Cancellable | None = None
         self._deadline_id: int = 0
+        self._gh = gh_path() if use_gh else None
+        self._subprocess: Gio.Subprocess | None = None
+
+    @property
+    def channel(self) -> str:
+        """Returns which channel lookups will try first: "gh" or "atom"."""
+
+        return "gh" if self._gh else "atom"
 
     def cancel(self) -> None:
         """Abandons whatever is in flight. Safe to call when nothing is."""
 
-        if self._deadline_id:
-            GLib.source_remove(self._deadline_id)
-            self._deadline_id = 0
+        self._clear_deadline()
         if self._cancellable is not None:
             self._cancellable.cancel()
             self._cancellable = None
+        if self._subprocess is not None:
+            self._subprocess.force_exit()
+            self._subprocess = None
         # Dropping a session with connections still open logs a runtime
         # warning from libsoup; abort closes them first.
         self._session.abort()
@@ -208,26 +206,19 @@ class Client:
             GLib.source_remove(self._deadline_id)
             self._deadline_id = 0
 
-    # --- JSON ------------------------------------------------------------
+    # --- Plain text over HTTPS -------------------------------------------
 
-    def _get_json(
+    def _get_text(
         self,
-        path: str,
-        on_done: Callable[[object | None, str | None], None],
+        url: str,
+        on_done: Callable[[str | None, str | None], None],
     ) -> None:
-        """GETs `path` and hands the decoded body, or an error string, to on_done."""
+        """GETs `url` and hands the body, or an error string, to on_done."""
 
-        if _exhausted():
-            on_done(None, rate_limit_message())
-            return
-
-        message = Soup.Message.new("GET", f"{API}{path}")
+        message = Soup.Message.new("GET", url)
         if message is None:
-            on_done(None, f"Could not build a request for {path}.")
+            on_done(None, f"could not build a request for {url}")
             return
-        headers = message.get_request_headers()
-        headers.append("Accept", "application/vnd.github+json")
-        headers.append("X-GitHub-Api-Version", "2022-11-28")
 
         cancellable = Gio.Cancellable.new()
         self._cancellable = cancellable
@@ -241,104 +232,177 @@ class Client:
                 on_done(None, _describe(error))
                 return
 
-            _note_budget(message)
-            status = message.get_status()
-            if status == Soup.Status.NOT_FOUND:
+            status = int(message.get_status())
+            if status == 404:
                 on_done(None, "not found")
                 return
             if _rate_limited(message):
                 on_done(None, rate_limit_message())
                 return
-            if status == Soup.Status.FORBIDDEN or status == 429:
-                on_done(None, f"GitHub refused the request ({int(status)}).")
-                return
-            if status != Soup.Status.OK:
-                on_done(None, f"GitHub returned {int(status)}.")
+            if status != 200:
+                on_done(None, f"GitHub returned {status}")
                 return
 
             data = body.get_data() if body is not None else None
             if not data:
-                on_done(None, "GitHub returned an empty response.")
+                on_done(None, "GitHub returned an empty response")
                 return
-            try:
-                on_done(json.loads(data.decode("utf-8")), None)
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                on_done(None, f"GitHub returned something that is not JSON: {error}")
+            on_done(data.decode("utf-8", errors="replace"), None)
 
         self._session.send_and_read_async(
             message, GLib.PRIORITY_DEFAULT, cancellable, finished
         )
+
+    # --- The gh CLI ------------------------------------------------------
+
+    def _run_gh(
+        self,
+        arguments: Sequence[str],
+        on_done: Callable[[str | None, str | None], None],
+    ) -> None:
+        """Runs gh asynchronously and hands stdout, or an error, to on_done."""
+
+        if self._gh is None:
+            on_done(None, "gh is not installed")
+            return
+
+        try:
+            process = Gio.Subprocess.new(
+                [self._gh, *arguments],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+            )
+        except GLib.Error as error:
+            on_done(None, _describe(error))
+            return
+
+        self._subprocess = process
+        cancellable = Gio.Cancellable.new()
+        self._cancellable = cancellable
+        self._deadline_id = _deadline(cancellable, _GH_DEADLINE_SECONDS)
+
+        def finished(source: Gio.Subprocess, result: Gio.AsyncResult) -> None:
+            self._clear_deadline()
+            self._subprocess = None
+            try:
+                _ok, stdout, stderr = source.communicate_utf8_finish(result)
+            except GLib.Error as error:
+                on_done(None, _describe(error))
+                return
+
+            if source.get_exit_status() != 0:
+                detail = (stderr or "").strip().splitlines()
+                on_done(None, detail[0] if detail else "gh failed")
+                return
+            on_done((stdout or "").strip(), None)
+
+        process.communicate_utf8_async(None, cancellable, finished)
+
+    def _gh_latest(
+        self,
+        repo: str,
+        on_done: Callable[[str | None, str | None], None],
+    ) -> None:
+        """Asks gh for the latest release, falling back to the tag list."""
+
+        def releases_done(output: str | None, error: str | None) -> None:
+            if error is None and output:
+                on_done(output.splitlines()[0].strip(), None)
+                return
+            # No releases published: ask for tags instead. gh reports this as
+            # a failure with "Not Found" on stderr.
+            def tags_done(tag_output: str | None, tag_error: str | None) -> None:
+                if tag_error is not None or not tag_output:
+                    on_done(None, tag_error or "gh returned nothing")
+                    return
+                chosen = best_tag([line.strip() for line in tag_output.splitlines()])
+                on_done(chosen, None if chosen else "no version tags")
+
+            self._run_gh(
+                ["api", f"repos/{repo}/tags?per_page=100", "--jq", ".[].name"],
+                tags_done,
+            )
+
+        self._run_gh(
+            ["api", f"repos/{repo}/releases/latest", "--jq", ".tag_name"],
+            releases_done,
+        )
+
+    # --- The Atom feeds --------------------------------------------------
+
+    def _atom_latest(
+        self,
+        repo: str,
+        on_done: Callable[[str | None, str | None], None],
+    ) -> None:
+        """Reads the releases feed, falling back to the tags feed.
+
+        Neither feed is an API endpoint, so neither spends any allowance. The
+        difference from gh is that a feed lists pre-releases alongside
+        releases, which is why the highest version is taken rather than the
+        first entry.
+        """
+
+        def releases_done(xml: str | None, error: str | None) -> None:
+            if error is not None and error != "not found":
+                on_done(None, error)
+                return
+            tags = parse_feed_tags(xml or "")
+            chosen = best_tag(tags)
+            if chosen is not None:
+                on_done(chosen, None)
+                return
+
+            def tags_done(tag_xml: str | None, tag_error: str | None) -> None:
+                if tag_error is not None and tag_error != "not found":
+                    on_done(None, tag_error)
+                    return
+                found = best_tag(parse_feed_tags(tag_xml or ""))
+                if found is None:
+                    on_done(None, "the repository has no releases or version tags")
+                    return
+                on_done(found, None)
+
+            self._get_text(f"{GITHUB}/{repo}/tags.atom", tags_done)
+
+        self._get_text(f"{GITHUB}/{repo}/releases.atom", releases_done)
+
+    # --- The one lookup callers use --------------------------------------
 
     def latest_version(
         self,
         repo: str,
         on_done: Callable[[str | None, str | None], None],
     ) -> None:
-        """Finds the newest release tag for `repo`, falling back to tags.
+        """Finds the newest release tag for `repo`.
 
-        Not every repository publishes releases -- orca-signal-filter has
-        none -- and a repository with tags but no releases is still one we
-        can update from, so a 404 on the releases endpoint falls through to
-        the tag list rather than reporting failure.
+        gh first when it is installed, then the Atom feeds. A gh failure is
+        not reported as the answer: gh may be absent, signed out, or pointed
+        at an enterprise host, and the feeds work in all three cases.
         """
 
         remembered = cached_tag(repo)
         if remembered is not None:
             # Answer through the main loop rather than straight away, so every
-            # caller sees the same asynchronous shape whether or not the tag
-            # was already known.
+            # caller sees the same asynchronous shape either way.
             GLib.idle_add(lambda: (on_done(remembered, None), False)[1])
             return
 
-        def releases_done(payload: object | None, error: str | None) -> None:
-            if error == "not found":
-                self._tags(repo, on_done)
-                return
-            if error is not None:
-                on_done(None, error)
-                return
-            tag = payload.get("tag_name") if isinstance(payload, dict) else None
-            if not tag:
-                self._tags(repo, on_done)
-                return
-            _tag_cache[repo] = (tag, time.time())
-            on_done(tag, None)
+        def finish(tag: str | None, error: str | None) -> None:
+            if tag:
+                _tag_cache[repo] = (tag, time.time())
+            on_done(tag, error)
 
-        self._get_json(f"/repos/{repo}/releases/latest", releases_done)
+        if self._gh is None:
+            self._atom_latest(repo, finish)
+            return
 
-    def _tags(
-        self,
-        repo: str,
-        on_done: Callable[[str | None, str | None], None],
-    ) -> None:
-        from .inventory import parse_version
+        def gh_done(tag: str | None, _error: str | None) -> None:
+            if tag:
+                finish(tag, None)
+                return
+            self._atom_latest(repo, finish)
 
-        def tags_done(payload: object | None, error: str | None) -> None:
-            if error is not None:
-                on_done(None, "the repository has no releases" if error == "not found" else error)
-                return
-            if not isinstance(payload, list):
-                on_done(None, "GitHub returned an unexpected tag list.")
-                return
-            best_tag, best_parts = None, None
-            for entry in payload:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name")
-                if not isinstance(name, str):
-                    continue
-                parts = parse_version(name)
-                if parts is None:
-                    continue
-                if best_parts is None or parts > best_parts:
-                    best_tag, best_parts = name, parts
-            if best_tag is None:
-                on_done(None, "the repository has no releases or version tags")
-                return
-            _tag_cache[repo] = (best_tag, time.time())
-            on_done(best_tag, None)
-
-        self._get_json(f"/repos/{repo}/tags?per_page=100", tags_done)
+        self._gh_latest(repo, gh_done)
 
     # --- Download --------------------------------------------------------
 
@@ -351,39 +415,30 @@ class Client:
         on_done: Callable[[bool, str | None, int], None],
         expected_bytes: int = 0,
     ) -> None:
-        """Streams a release tarball to `destination`.
+        """Streams a tag's source archive to `destination`.
 
-        Releases for these add-ons carry no assets, only the auto-generated
-        tarball, so that is what is fetched.
+        Fetched from github.com/<repo>/archive/refs/tags/<tag>.tar.gz rather
+        than through the API, so it spends no API allowance: measured
+        returning 200 while the API was answering 403 for exhaustion.
 
-        **A Content-Length may or may not arrive, and the first fetch of any
-        tag is the one without it.** Measured on two tags rather than assumed:
-        the API redirects to codeload.github.com, which generates the archive
-        on the first request and signals the end by closing the connection
-        (``Soup.Encoding.EOF``, no length); once it has that archive cached it
-        serves the same URL with a real Content-Length
-        (``Soup.Encoding.CONTENT_LENGTH``). A new release is therefore exactly
-        the case where the size is unknown, so the unknown path is the normal
-        one and not an edge case.
-
-        With a length, the fraction is bytes over it. Without, it is bytes
-        over `expected_bytes` -- the size this repository's tarball was last
-        time, which the caller remembers -- or DEFAULT_ESTIMATE_BYTES when
-        there is no last time. Because that is a guess, an estimated fraction
-        is held below 1.0 until the stream actually ends: the bar moves with
-        real bytes received and never claims to have finished before it has.
-        `on_done` reports the true size so the caller can remember it.
+        **A Content-Length may or may not arrive.** codeload generates the
+        archive on the first request for a tag and closes the connection to
+        signal the end (``Soup.Encoding.EOF``, no length); once it has that
+        archive cached it serves a real length. A new release is therefore
+        exactly the case with no size, so the unknown path is the normal one.
+        Without a length the fraction is bytes over `expected_bytes` -- what
+        this repository's archive weighed last time -- or
+        DEFAULT_ESTIMATE_BYTES, and an estimated fraction is held below 1.0
+        until the stream actually ends, so the bar never claims to have
+        finished before it has.
         """
 
-        if _exhausted():
-            on_done(False, rate_limit_message(), 0)
-            return
-
-        message = Soup.Message.new("GET", f"{API}/repos/{repo}/tarball/{tag}")
+        escaped = GLib.Uri.escape_string(tag, None, True)
+        url = f"{GITHUB}/{repo}/archive/refs/tags/{escaped}.tar.gz"
+        message = Soup.Message.new("GET", url)
         if message is None:
-            on_done(False, "Could not build a download request.", 0)
+            on_done(False, "could not build a download request", 0)
             return
-        message.get_request_headers().append("Accept", "application/vnd.github+json")
 
         cancellable = Gio.Cancellable.new()
         self._cancellable = cancellable
@@ -402,14 +457,11 @@ class Client:
                 fail(_describe(error))
                 return
 
-            _note_budget(message)
             if _rate_limited(message):
-                # This is the branch that reported a bare "403" and left the
-                # user with no idea the fix was simply to wait.
                 fail(rate_limit_message())
                 return
-            if message.get_status() != Soup.Status.OK:
-                fail(f"GitHub returned {int(message.get_status())} for the download.")
+            if int(message.get_status()) != 200:
+                fail(f"GitHub returned {int(message.get_status())} for the download")
                 return
 
             length = message.get_response_headers().get_content_length()
@@ -418,7 +470,7 @@ class Client:
             else:
                 state["total"] = expected_bytes or DEFAULT_ESTIMATE_BYTES
             if state["measured"] and state["total"] > MAX_DOWNLOAD_BYTES:
-                fail("The download is larger than this add-on is willing to fetch.")
+                fail("the download is larger than this add-on is willing to fetch")
                 return
 
             try:
@@ -451,7 +503,7 @@ class Client:
                 state["received"] += size
                 if state["received"] > MAX_DOWNLOAD_BYTES:
                     _close(stream, sink)
-                    fail("The download exceeded the size this add-on will fetch.")
+                    fail("the download exceeded the size this add-on will fetch")
                     return
 
                 try:
