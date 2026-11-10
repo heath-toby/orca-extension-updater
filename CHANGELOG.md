@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.0
+
+**Pressing the key again no longer spends a request per add-on before it
+downloads anything.**
+
+Found in the field, and the diagnosis is worth recording because the symptom
+pointed elsewhere. A run of eight updates installed seven and left Wayland
+Clipboard behind; it looked add-on specific, and it was not. The allowance is
+spent one request per add-on to check, plus one more per add-on to install, so
+with ten add-ons a check and a full round of updates is nineteen of the sixty
+requests an hour allows. Retrying spends another nineteen. The add-on that
+loses is always the last one in the run, which is alphabetical -- hence always
+Wayland Clipboard.
+
+- Release tags are now remembered for fifteen minutes, so a second attempt
+  spends its requests on downloads rather than on asking again. Fifteen
+  minutes is measured against the shortest check interval, an hour, so a
+  scheduled check never answers from the cache.
+- A download refused for the allowance now **stops the run** instead of
+  attempting the rest, which would each fail the same way. The ones not
+  reached are named, so it is clear there is something to come back for.
+
 ## 1.1.0
 
 **You can now name the repository for an add-on that does not declare one.**

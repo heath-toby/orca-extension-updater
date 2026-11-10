@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import gi
 
@@ -266,7 +266,9 @@ class CompletionDialog(Gtk.Dialog):
 
     RESPONSE_RESTART = 1
 
-    def __init__(self, results: list[Result]) -> None:
+    def __init__(
+        self, results: list[Result], not_attempted: Sequence[str] = ()
+    ) -> None:
         super().__init__(title="Updates complete", modal=True)
         _name(self, "Updates complete")
         self.set_default_size(480, -1)
@@ -275,7 +277,7 @@ class CompletionDialog(Gtk.Dialog):
         content.set_spacing(8)
         content.set_border_width(12)
 
-        for line in summarise(results):
+        for line in summarise(results, not_attempted):
             label = Gtk.Label(label=line)
             label.set_xalign(0.0)
             label.set_line_wrap(True)
@@ -296,7 +298,7 @@ class CompletionDialog(Gtk.Dialog):
         _schedule_resume()
 
 
-def summarise(results: list[Result]) -> list[str]:
+def summarise(results: list[Result], not_attempted: Sequence[str] = ()) -> list[str]:
     """Builds the lines the completion dialog shows and Orca reads."""
 
     updated = [r for r in results if r.ok]
@@ -349,10 +351,19 @@ def summarise(results: list[Result]) -> list[str]:
     # A run cut short by the hourly allowance is not a fault to investigate,
     # it is a wait. Say which it was, because "GitHub refused the request"
     # sends the user looking for a problem that will fix itself.
+    if not_attempted:
+        lines.append(
+            f"Not attempted: {', '.join(not_attempted)}."
+            if len(not_attempted) <= 4
+            else f"{len(not_attempted)} others were not attempted."
+        )
+
     if any("hourly limit" in (r.error or "") for r in failed):
         lines.append(
             "That is a wait, not a fault: press Orca+Shift+U again once the limit "
-            "resets and the rest will install."
+            "resets and the rest will install. The versions already found are "
+            "remembered, so a second attempt spends its requests on downloads "
+            "rather than on looking again."
         )
 
     if any(r.ok and r.has_install_script for r in updated):
@@ -437,6 +448,7 @@ class Flow:
         self._progress: ProgressDialog | None = None
         self._queue: list[Available] = []
         self._results: list[Result] = []
+        self._not_attempted: list[str] = []
         self._busy = False
 
     @property
@@ -469,6 +481,7 @@ class Flow:
         self._busy = True
         self._queue = list(chosen)
         self._results = []
+        self._not_attempted = []
         self._installer = Installer(
             self._extensions_dir, self._log, self_source_id=self._self_source_id
         )
@@ -504,6 +517,18 @@ class Flow:
                 # Do not keep swapping packages under an Orca that is already
                 # in a state we could not undo.
                 self._queue = []
+            elif "hourly limit" in (result.error or ""):
+                # Every remaining download would be refused for the same
+                # reason, so stop rather than produce a column of identical
+                # failures. They are reported as not attempted, which is the
+                # truth and is also what tells the user there is something
+                # left to come back for.
+                self._not_attempted = [entry.item.label for entry in self._queue]
+                self._queue = []
+                self._log(
+                    f"stopped after the hourly limit; {len(self._not_attempted)} "
+                    "not attempted"
+                )
             self._next()
 
         assert self._installer is not None
@@ -526,7 +551,7 @@ class Flow:
             progress.destroy()
 
         results = self._results
-        dialog = CompletionDialog(results)
+        dialog = CompletionDialog(results, self._not_attempted)
 
         def responded(widget: CompletionDialog, response: int) -> None:
             _suspend_events()

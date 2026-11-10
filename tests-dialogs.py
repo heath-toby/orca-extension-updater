@@ -149,8 +149,8 @@ finally:
 
 # --- The completion summary --------------------------------------------------
 
-def summary(results):
-    return " ".join(U.summarise(results))
+def summary(results, not_attempted=()):
+    return " ".join(U.summarise(results, not_attempted))
 
 
 ok_result = Result("Polyglot", "polyglot", "2.10.0", "2.11.0", ok=True)
@@ -199,6 +199,19 @@ check("a rate-limited run says how to finish it",
 text = summary([failed])
 check("an ordinary failure is not called a wait",
       "a wait, not a fault" in text, False)
+
+# A run stopped by the allowance reports what it did not get to, which is
+# what tells the user there is something to come back for.
+text = summary([ok_result, limited], ["Audio Themes", "Clock"])
+check("the not-attempted add-ons are named",
+      "Not attempted: Audio Themes, Clock." in text, True)
+check("the not-attempted line does not appear when there are none",
+      "Not attempted" in summary([ok_result]), False)
+check("a long not-attempted list is counted rather than listed",
+      "6 others were not attempted." in summary(
+          [limited], ["a", "b", "c", "d", "e", "f"]), True)
+check("the retry advice mentions that versions are remembered",
+      "remembered" in summary([limited], ["a"]), True)
 
 text = summary([ok_with_script])
 check("an add-on with its own install.sh is flagged",

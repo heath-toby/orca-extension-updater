@@ -124,6 +124,40 @@ try:
 finally:
     G._budget["remaining"], G._budget["reset"] = saved
 
+# --- The tag cache -----------------------------------------------------------
+# This exists because of how the allowance is spent in practice: a check costs
+# one request per add-on and each update costs one more, so pressing the key
+# again used to re-ask about every repository before downloading anything.
+
+G.clear_tag_cache()
+check("an empty cache knows nothing", G.cached_tag("owner/repo"), None)
+
+G._tag_cache["owner/repo"] = ("v1.2.3", time.time())
+check("a fresh entry is returned", G.cached_tag("owner/repo"), "v1.2.3")
+check("another repository is unaffected", G.cached_tag("owner/other"), None)
+
+# Just inside, and just outside, the window.
+G._tag_cache["owner/repo"] = ("v1.2.3", time.time() - (G.TAG_CACHE_SECONDS - 5))
+check("an entry inside the window is still used", G.cached_tag("owner/repo"), "v1.2.3")
+G._tag_cache["owner/repo"] = ("v1.2.3", time.time() - (G.TAG_CACHE_SECONDS + 5))
+check("a stale entry is not used", G.cached_tag("owner/repo"), None)
+check("a stale entry is dropped rather than kept",
+      "owner/repo" in G._tag_cache, False)
+
+# The window must be shorter than the shortest check interval, or a scheduled
+# hourly check would answer from a cache instead of asking.
+check("the window is shorter than an hour", G.TAG_CACHE_SECONDS < 3600, True)
+
+G._tag_cache["a/b"] = ("v1", time.time())
+G.clear_tag_cache()
+check("clearing forgets everything", G.cached_tag("a/b"), None)
+
+# A time far in the future must not be treated as stale.
+G._tag_cache["owner/repo"] = ("v9.9.9", time.time() + 60)
+check("a clock skew forward does not discard the entry",
+      G.cached_tag("owner/repo"), "v9.9.9")
+G.clear_tag_cache()
+
 check("the default estimate is a plausible tarball size",
       1024 < G.DEFAULT_ESTIMATE_BYTES < 10 * 1024 * 1024, True)
 check("an estimated fraction cannot reach the end of its phase",

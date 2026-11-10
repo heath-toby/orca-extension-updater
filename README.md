@@ -164,8 +164,14 @@ and two or three rounds in quick succession will run it out.
 
 When that happens the add-on says so and says when the limit resets, rather
 than reporting a bare 403. The allowance is read from the headers every
-response already carries, so a request certain to be refused is not made.
+response already carries, so a request certain to be refused is not made, and
+a download refused for the limit stops the run instead of attempting the rest.
 Press Orca+Shift+U again after the reset and the rest will install.
+
+Release tags are remembered for fifteen minutes, so a second attempt spends
+its requests on downloads rather than on asking again. That window is shorter
+than the shortest check interval, so a scheduled check never answers from the
+cache.
 
 Conditional requests are not used, because a 304 still counts against the
 limit.

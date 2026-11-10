@@ -41,6 +41,43 @@ _DOWNLOAD_DEADLINE_SECONDS = 300
 
 _CHUNK = 64 * 1024
 
+# How long a release tag stays usable without asking again.
+#
+# This exists because of how the allowance is actually spent: a check costs
+# one request per add-on, and a round of updates costs one more each, so with
+# ten add-ons a check followed by updating them all is nineteen of the sixty
+# requests an hour allows. Retry that twice and the last add-on in the run
+# fails for want of a request -- which is exactly what happened in the field,
+# always to the last one alphabetically.
+#
+# Fifteen minutes is chosen against the shortest check interval, an hour: a
+# scheduled check never finds the cache warm, so this only ever saves the
+# requests spent by pressing the key again, which is the case that was
+# exhausting the allowance.
+TAG_CACHE_SECONDS = 900
+
+_tag_cache: dict[str, tuple[str, float]] = {}
+
+
+def clear_tag_cache() -> None:
+    """Forgets every remembered tag. For tests, and for a forced re-check."""
+
+    _tag_cache.clear()
+
+
+def cached_tag(repo: str) -> str | None:
+    """Returns the tag last seen for `repo`, if it is still fresh."""
+
+    entry = _tag_cache.get(repo)
+    if entry is None:
+        return None
+    tag, when = entry
+    if time.time() - when > TAG_CACHE_SECONDS:
+        del _tag_cache[repo]
+        return None
+    return tag
+
+
 # What to assume a tarball weighs when we have never fetched this repository
 # before. The add-ons in this family run from roughly 30 KB to 160 KB, so this
 # is a little above the largest of them: a guess that is too high makes the bar
@@ -245,6 +282,14 @@ class Client:
         the tag list rather than reporting failure.
         """
 
+        remembered = cached_tag(repo)
+        if remembered is not None:
+            # Answer through the main loop rather than straight away, so every
+            # caller sees the same asynchronous shape whether or not the tag
+            # was already known.
+            GLib.idle_add(lambda: (on_done(remembered, None), False)[1])
+            return
+
         def releases_done(payload: object | None, error: str | None) -> None:
             if error == "not found":
                 self._tags(repo, on_done)
@@ -256,6 +301,7 @@ class Client:
             if not tag:
                 self._tags(repo, on_done)
                 return
+            _tag_cache[repo] = (tag, time.time())
             on_done(tag, None)
 
         self._get_json(f"/repos/{repo}/releases/latest", releases_done)
@@ -289,6 +335,7 @@ class Client:
             if best_tag is None:
                 on_done(None, "the repository has no releases or version tags")
                 return
+            _tag_cache[repo] = (best_tag, time.time())
             on_done(best_tag, None)
 
         self._get_json(f"/repos/{repo}/tags?per_page=100", tags_done)
