@@ -213,6 +213,20 @@ check("a long not-attempted list is counted rather than listed",
 check("the retry advice mentions that versions are remembered",
       "remembered" in summary([limited], ["a"]), True)
 
+# An add-on that installed but does not load, and was not loading before.
+stranded = Result("Wayland Clipboard", "wayland_clipboard", "1.2.0", "1.2.1",
+                  ok=True, loaded_before=False, not_loaded=True)
+text = summary([stranded])
+check("a stranded add-on is named", "Wayland Clipboard installed" in text, True)
+check("a stranded add-on is not blamed on the update",
+      "not the cause" in text, True)
+check("a stranded add-on says it was already not loading",
+      "not loading before the update" in text, True)
+check("a stranded add-on is still counted as updated",
+      "Updated: Wayland Clipboard to 1.2.1." in text, True)
+check("an ordinary success is not called stranded",
+      "does not load it" in summary([ok_result]), False)
+
 text = summary([ok_with_script])
 check("an add-on with its own install.sh is flagged",
       "dependency" in text, True)

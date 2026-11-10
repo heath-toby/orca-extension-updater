@@ -64,6 +64,14 @@ class Result:
     # Set when the new version is installed and approved but has not been
     # loaded, because the extension doing the updating cannot reload itself.
     restart_required: bool = False
+    # Whether Orca had this extension loaded before the update started. An
+    # extension that was already failing to load must not make its update
+    # look like the cause.
+    loaded_before: bool = True
+    # Set when the update installed cleanly but the extension still does not
+    # load -- and did not load before either, so this is the add-on's own
+    # problem rather than the update's.
+    not_loaded: bool = False
     # Set when a rollback itself failed to come back up. The add-on cannot
     # repair this from inside Orca, so it must stop and say so.
     unrecoverable: bool = False
@@ -228,7 +236,13 @@ class Installer:
             source_id=item.source_id,
             from_version=item.version,
             to_version=tag.lstrip("v"),
+            loaded_before=self._is_loaded(item),
         )
+        if not result.loaded_before:
+            self._log(
+                f"{item.source_id} is not loaded in this Orca; updating it anyway, "
+                "but its loading will not be treated as a test of the update"
+            )
 
         try:
             workdir = tempfile.mkdtemp(prefix="orca-extension-update-")
@@ -469,6 +483,27 @@ class Installer:
         except OSError as error:
             raise _Failed(f"could not install the update: {error}") from error
 
+    def _is_loaded(self, item: Managed) -> bool:
+        """Returns whether Orca currently has this extension loaded.
+
+        Asked *before* anything is touched, because "it does not load" is only
+        evidence against the update if it loaded a moment ago. An extension
+        that was already failing to load -- a silent state, since Orca logs a
+        failed import at WARNING and starts anyway -- would otherwise make its
+        own update look like the cause, and make a perfectly good rollback look
+        like a catastrophe.
+        """
+
+        from orca import extension_loader
+
+        if not item.class_name:
+            return False
+        try:
+            loader = extension_loader.get_loader()
+            return loader.get_loaded_user_extension(item.class_name) is not None
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+
     def _approve(self, filepath: str) -> None:
         from orca import extension_loader
 
@@ -513,6 +548,15 @@ class Installer:
             raise _Failed(f"the new version failed to load: {error}") from error
 
         if item.class_name and loader.get_loaded_user_extension(item.class_name) is None:
+            if result is not None and not result.loaded_before:
+                # It was not loading before the update either, so the update
+                # is not what broke it and rolling back would not fix it.
+                result.not_loaded = True
+                self._log(
+                    f"{item.source_id} still does not load, as it did not before "
+                    "the update; keeping the new version"
+                )
+                return
             raise _Failed("the new version did not load")
 
     # --- Going back ------------------------------------------------------
@@ -532,7 +576,7 @@ class Installer:
                     os.remove(paths.installed)
             os.rename(paths.backup, paths.installed)
             self._approve(paths.installed)
-            self._reload(item)
+            self._reload(item, result)
         except Exception as error:  # pylint: disable=broad-exception-caught
             result.unrecoverable = True
             result.error = (

@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.3.0
+
+**An add-on that was already failing to load no longer looks like a failed
+update.**
+
+Reported from the field as "the new version did not load and the old version
+could not be put back", which sounded catastrophic and was not. Both halves
+were true, and neither was this add-on's fault: Wayland Clipboard had stopped
+loading some time earlier, because Orca renamed `orca.clipboard` to
+`orca.clipboard_manager` and the add-on imported the old name. Orca catches a
+failed extension import, logs it at WARNING, and starts anyway, so nothing
+ever said so. The update installed correctly and the rollback restored
+correctly; only the "does it load?" test failed, twice, for a reason that had
+nothing to do with either.
+
+- Whether Orca has the extension loaded is now recorded **before** anything is
+  touched. "It does not load" is only evidence against an update if it loaded a
+  moment ago.
+- An add-on that was not loading beforehand is updated, kept, and reported
+  plainly: it installed, Orca does not load it, and the update is not the
+  cause. An add-on that *was* loading and then stops is still rolled back,
+  exactly as before.
+- New: `tools/probe-extensions.py` reports which installed extensions can
+  actually be imported. This is the diagnostic that was missing — the Wayland
+  Clipboard fault would have taken one second to find.
+
 ## 1.2.0
 
 **Pressing the key again no longer spends a request per add-on before it

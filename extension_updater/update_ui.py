@@ -366,6 +366,16 @@ def summarise(results: list[Result], not_attempted: Sequence[str] = ()) -> list[
             "rather than on looking again."
         )
 
+    stranded = [r for r in updated if r.not_loaded]
+    if stranded:
+        names = ", ".join(r.label for r in stranded)
+        plural = "" if len(stranded) == 1 else "s"
+        lines.append(
+            f"{names} installed, but Orca does not load it: and it was not loading "
+            f"before the update either, so the update is not the cause. Check that "
+            f"add-on{plural} against this version of Orca."
+        )
+
     if any(r.ok and r.has_install_script for r in updated):
         lines.append(
             "If an updated add-on has gained a new dependency, run its own "

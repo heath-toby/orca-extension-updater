@@ -289,7 +289,7 @@ def install_fixture():
     return root, extensions
 
 
-def run_install(package_body, loader, extra_files=()):
+def run_install(package_body, loader, extra_files=(), loaded_before=True):
     """Runs the whole post-download path and returns (result, installed_text)."""
 
     root, extensions = install_fixture()
@@ -334,7 +334,13 @@ def run_install(package_body, loader, extra_files=()):
             filepath=os.path.join(extensions, "demo"),
             is_package=True,
         )
-        result = I.Result(label="Demo", source_id="demo", from_version="1.0.0", to_version="2.0.0")
+        result = I.Result(
+            label="Demo",
+            source_id="demo",
+            from_version="1.0.0",
+            to_version="2.0.0",
+            loaded_before=loaded_before,
+        )
         workdir = os.path.join(root, "work")
         os.makedirs(workdir)
         shutil.copy2(tarball, os.path.join(workdir, "release.tar.gz"))
@@ -481,6 +487,29 @@ try:
     check("updating itself writes the new version", installed, 'VERSION = "2.0.0"\n')
 finally:
     shutil.rmtree(root, ignore_errors=True)
+
+
+# (d3) An extension that was ALREADY failing to load before the update. Orca
+# logs a failed import at WARNING and starts anyway, so this is a silent state
+# a user can sit in for weeks -- and it must not make the update look like the
+# cause, nor make a good rollback look like a catastrophe. This is the bug that
+# reported "the new version did not load and the old version could not be put
+# back" when both were true and neither was the updater's fault.
+loader = FakeLoader(fail_loads=99)
+outcome, text = run_install('VERSION = "2.0.0"\n', loader, loaded_before=False)
+check("an already-broken add-on still updates", outcome.ok, True)
+check("an already-broken add-on is not reported as a failure", outcome.error, None)
+check("an already-broken add-on keeps the new version", text, 'VERSION = "2.0.0"\n')
+check("an already-broken add-on is flagged as not loading", outcome.not_loaded, True)
+check("an already-broken add-on is not called unrecoverable", outcome.unrecoverable, False)
+check("an already-broken add-on is not rolled back", len(loader.approved), 1)
+
+# But when it WAS loading, a version that does not load is still a failure.
+loader = FakeLoader(fail_loads=1)
+outcome, text = run_install('VERSION = "2.0.0"\n', loader, loaded_before=True)
+check("a working add-on that breaks is still rolled back", outcome.ok, False)
+check("a working add-on that breaks keeps the old version", text, 'VERSION = "1.0.0"\n')
+check("a working add-on that breaks is not flagged not_loaded", outcome.not_loaded, False)
 
 
 # (e2) A single-FILE extension, not a package. Resource Monitor is one, and

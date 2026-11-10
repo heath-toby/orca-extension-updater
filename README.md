@@ -115,6 +115,18 @@ If a rollback itself fails to come back up, the add-on stops, says so, and
 tells you to restart Orca. That is the one state it cannot repair from inside
 Orca.
 
+**Unless it was already broken.** Whether Orca has the extension loaded is
+recorded before anything is touched, because "it does not load" is only
+evidence against an update if it loaded a moment ago. An add-on that was not
+loading beforehand is updated, kept, and reported as installed-but-not-loaded,
+with the update explicitly not blamed. This matters because a failed extension
+import is **silent**: Orca logs it at WARNING and starts anyway, so an add-on
+can be absent for weeks with no symptom but the thing it used to do no longer
+happening.
+
+`tools/probe-extensions.py` reports which installed extensions can actually be
+imported, which is the quickest way to find that state.
+
 ### What it does not do
 
 It installs code, not dependencies. The downloaded `install.sh` is never run:
