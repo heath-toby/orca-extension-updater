@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.1
+
+**"One version could not be checked" now says which, and stops saying it.**
+
+Heard on every check: *"No extension updates available, one version could not
+be checked."* It was true and useless. The add-on was Signal Filter, whose
+repository has never published a release or a tag, so there is nothing there
+to compare a version against — a settled fact about that repository rather
+than a failure of the check, and counting it reported a problem without saying
+where.
+
+- A repository that publishes nothing is now **named**, and described as
+  having nothing to check rather than as having failed: *"No extension updates
+  available. Signal Filter publishes no releases, so there is nothing to
+  check."*
+- It is said **once per Orca session**. Permanent facts do not need repeating
+  on every keypress, and the log records it every time regardless.
+- A check that genuinely failed is reported separately, with the add-on's name
+  and the reason, because that one may be worth retrying.
+- A refusal for request volume still says the check could not be made, rather
+  than claiming there are no updates — the distinction being that we did not
+  find out.
+
 ## 1.4.0
 
 **It no longer uses GitHub's rationed API at all.**

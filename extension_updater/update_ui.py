@@ -388,6 +388,62 @@ def summarise(results: list[Result], not_attempted: Sequence[str] = ()) -> list[
     return lines
 
 
+# --- What a check found ------------------------------------------------------
+
+# The reason an extension's repository publishes nothing to compare against.
+# This is a settled fact about that repository, not a failure of the check.
+NO_RELEASES = "no releases or version tags"
+
+
+def names(labels: Sequence[str]) -> str:
+    """Joins add-on names the way they would be read aloud."""
+
+    labels = list(labels)
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    return f"{', '.join(labels[:-1])} and {labels[-1]}"
+
+
+def describe_check(
+    unpublished: Sequence[str],
+    failures: Sequence[tuple[str, str]],
+    rate_limited: str = "",
+) -> str:
+    """Returns the sentence spoken when a check finds no updates.
+
+    Three kinds of silence need telling apart, because they call for
+    different things from the user:
+
+    * nothing to report, which needs one short sentence;
+    * a repository that publishes no releases at all, which is permanent and
+      needs naming once so it can be acted on -- counting it, as this used to,
+      says there is a problem without saying where, every single time;
+    * a check that genuinely failed, which may be worth retrying.
+    """
+
+    if rate_limited:
+        # Not "no updates available": the truth is that we could not find out.
+        return f"Could not check for updates: {rate_limited}."
+
+    parts = ["No extension updates available."]
+    if failures:
+        if len(failures) == 1:
+            label, reason = failures[0]
+            parts.append(f"{label} could not be checked: {reason}.")
+        else:
+            parts.append(
+                f"{names([label for label, _reason in failures])} could not be checked."
+            )
+    if unpublished:
+        verb = "publishes" if len(unpublished) == 1 else "publish"
+        parts.append(
+            f"{names(unpublished)} {verb} no releases, so there is nothing to check."
+        )
+    return " ".join(parts)
+
+
 # --- Restarting --------------------------------------------------------------
 
 

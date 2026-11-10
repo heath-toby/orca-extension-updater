@@ -147,6 +147,54 @@ finally:
     progress.destroy()
 
 
+# --- What a check reports ----------------------------------------------------
+# A repository that publishes nothing is permanent and must be named so it can
+# be acted on; a failed check may be worth retrying. Counting them both, as
+# this used to, said "one version could not be checked" on every single check
+# about a repository that has never had a release.
+
+check("nothing to report is one short sentence",
+      U.describe_check([], []), "No extension updates available.")
+
+text = U.describe_check(["Signal Filter"], [])
+check("a repository with no releases is named", "Signal Filter" in text, True)
+check("a repository with no releases is not called a failure",
+      "could not be checked" in text, False)
+check("a repository with no releases says there is nothing to check",
+      "nothing to check" in text, True)
+check("a repository with no releases is singular",
+      "Signal Filter publishes no releases" in text, True)
+
+text = U.describe_check(["Signal Filter", "Other"], [])
+check("two such repositories are joined readably",
+      "Signal Filter and Other publish no releases" in text, True)
+
+text = U.describe_check([], [("Polyglot", "the request timed out")])
+check("a single failure names the add-on and the reason",
+      "Polyglot could not be checked: the request timed out." in text, True)
+
+text = U.describe_check([], [("A", "x"), ("B", "y")])
+check("several failures are named without piling up reasons",
+      "A and B could not be checked." in text, True)
+
+text = U.describe_check(["Signal Filter"], [("Polyglot", "the request timed out")])
+check("both kinds are reported together",
+      "Polyglot could not be checked" in text and "Signal Filter publishes" in text,
+      True)
+
+# A refusal means we could not find out, so it must not claim there are none.
+text = U.describe_check([], [], "GitHub is refusing requests for the moment")
+check("a refusal does not claim there are no updates",
+      "No extension updates available" in text, False)
+check("a refusal says the check could not be made",
+      text.startswith("Could not check for updates:"), True)
+
+check("names() handles one, two and three",
+      [U.names(["A"]), U.names(["A", "B"]), U.names(["A", "B", "C"])],
+      ["A", "A and B", "A, B and C"])
+check("names() of nothing is empty", U.names([]), "")
+
+
 # --- The completion summary --------------------------------------------------
 
 def summary(results, not_attempted=()):

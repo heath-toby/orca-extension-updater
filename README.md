@@ -23,6 +23,11 @@ checks for before it does anything.
 - **Orca+Shift+U** checks now. It always answers: the dialog opens if there
   are updates, and it says "no extension updates available" if there are not,
   so the key never leaves you wondering whether the check happened.
+- An add-on whose repository has never published a release or tag is named
+  once per Orca session — there is nothing to compare a version against, which
+  is a fact about that repository rather than a failed check. An add-on whose
+  check genuinely failed is reported every time, with the reason, because that
+  may be worth retrying.
 - A check also runs shortly after Orca starts, and then on the interval you
   choose.
 - Settings are in Orca Preferences, under User Extensions, Extension Updater:
