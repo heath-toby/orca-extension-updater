@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Monday 06:00 UTC — catches Orca upstream drift on a schedule.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: syntax + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: install ruff
+        run: python -m pip install --upgrade pip ruff
+      - name: compile every .py (catches typos and broken syntax)
+        run: python -m compileall -q extension_updater tests-dialogs.py tests-end-to-end.py tests-github.py tests-installer.py tests-inventory.py tests-schedule.py
+      - name: ruff check
+        # Advisory — we want to see the output but never block a merge on
+        # style warnings. The 'syntax' gate is python -m compileall above.
+        run: ruff check extension_updater tests-dialogs.py tests-end-to-end.py tests-github.py tests-installer.py tests-inventory.py tests-schedule.py || true
+
+  import-check:
+    name: import against Orca master
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: system deps (accessibility + GTK typelibs + louis)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi python3-louis \
+            gir1.2-glib-2.0 gir1.2-gobject-2.0 \
+            gir1.2-atspi-2.0 gir1.2-atk-1.0 \
+            gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            gir1.2-gdk-3.0 gir1.2-gdkpixbuf-2.0 \
+            gir1.2-pango-1.0 gir1.2-cairo-1.0 \
+            at-spi2-core libatspi2.0-dev
+
+      - name: install Orca (master from git) with meson stubs
+        run: |
+          git clone --depth 1 https://gitlab.gnome.org/GNOME/orca.git /tmp/orca
+          cat > /tmp/orca/src/orca/orca_i18n.py <<'PY'
+          """CI stub for the meson-generated orca_i18n module."""
+          from gettext import gettext as _
+          def C_(ctx, s): return s
+          def ngettext(a, b, n): return a if n == 1 else b
+          PY
+          cat > /tmp/orca/src/orca/orca_platform.py <<'PY'
+          """CI stub for the meson-generated orca_platform module."""
+          version = "master"
+          revision = "ci-stub"
+          prefix = "/usr"
+          datadir = "/usr/share"
+          localedir = "/usr/share/locale"
+          PY
+          echo "PYTHONPATH=/tmp/orca/src:/usr/lib/python3/dist-packages:$PYTHONPATH" >> "$GITHUB_ENV"
+
+      - name: install runtime dependencies
+        # Do NOT upgrade pip — the prepended dist-packages path surfaces
+        # a dpkg-owned pip that refuses to be uninstalled.
+        run: python -m pip install dasbus
+
+      - name: probe-import modules (catches signature drift against Orca)
+        run: |
+          export PYTHONPATH="$PWD:$PYTHONPATH"
+          python - <<'PY'
+          import importlib, sys
+          targets = "extension_updater,extension_updater.github,extension_updater.installer,extension_updater.inventory,extension_updater.scheduler,extension_updater.update_ui".split(",")
+          failed = []
+          for name in targets:
+              try:
+                  importlib.import_module(name)
+                  print(f"ok   {name}")
+              except Exception as e:
+                  print(f"FAIL {name}: {type(e).__name__}: {e}")
+                  failed.append((name, e))
+          sys.exit(1 if failed else 0)
+          PY
